@@ -1,0 +1,738 @@
+From af832f0dd108fcfbe86517ee409797d5abe4caf8 Mon Sep 17 00:00:00 2001
+From: "wenxin.leong" <wenxin.leong@infineon.com>
+Date: Wed, 8 Jun 2022 15:19:15 +0800
+Subject: [PATCH] Implement new tcti library.
+
+Implement tss2-tcti-sock library for communicating with a TPM through a socket.
+---
+ Makefile.am                   |  17 ++
+ configure.ac                  |  23 +-
+ include/tss2/tss2_tcti_sock.h |  24 ++
+ lib/tss2-tcti-sock.map        |   7 +
+ lib/tss2-tcti-sock.pc.in      |  12 +
+ src/tss2-tcti/tcti-sock.c     | 505 ++++++++++++++++++++++++++++++++++
+ src/tss2-tcti/tcti-sock.h     |  42 +++
+ src/tss2-tcti/tctildr-dl.c    |   4 +
+ 8 files changed, 628 insertions(+), 6 deletions(-)
+ create mode 100644 include/tss2/tss2_tcti_sock.h
+ create mode 100644 lib/tss2-tcti-sock.map
+ create mode 100644 lib/tss2-tcti-sock.pc.in
+ create mode 100644 src/tss2-tcti/tcti-sock.c
+ create mode 100644 src/tss2-tcti/tcti-sock.h
+
+diff --git a/Makefile.am b/Makefile.am
+index ce19aac3b..f15f163d1 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -340,6 +340,23 @@ src_tss2_tcti_libtss2_tcti_mssim_la_SOURCES  = \
+     src/tss2-tcti/tcti-mssim.c
+ endif # ENABLE_TCTI_MSSIM
+ 
++# tcti sock library
++if ENABLE_TCTI_SOCK
++libtss2_tcti_sock = src/tss2-tcti/libtss2-tcti-sock.la
++tss2_HEADERS += $(srcdir)/include/tss2/tss2_tcti_sock.h
++lib_LTLIBRARIES += $(libtss2_tcti_sock)
++pkgconfig_DATA += lib/tss2-tcti-sock.pc
++EXTRA_DIST += lib/tss2-tcti-sock.map
++
++if HAVE_LD_VERSION_SCRIPT
++src_tss2_tcti_libtss2_tcti_sock_la_LDFLAGS  = -Wl,--version-script=$(srcdir)/lib/tss2-tcti-sock.map
++endif # HAVE_LD_VERSION_SCRIPT
++src_tss2_tcti_libtss2_tcti_sock_la_LIBADD   = $(libtss2_mu) $(libutil)
++src_tss2_tcti_libtss2_tcti_sock_la_SOURCES  = \
++    src/tss2-tcti/tcti-common.c \
++    src/tss2-tcti/tcti-sock.c
++endif # ENABLE_TCTI_SOCK
++
+ # tcti pcap library
+ if ENABLE_TCTI_PCAP
+ libtss2_tcti_pcap = src/tss2-tcti/libtss2-tcti-pcap.la
+diff --git a/configure.ac b/configure.ac
+index 6482944f7..ae01e6583 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -15,7 +15,7 @@ m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])]) #Backward compatible setti
+ 
+ AC_CONFIG_HEADERS([config.h])
+ 
+-AC_CONFIG_FILES([Makefile Doxyfile lib/tss2-sys.pc lib/tss2-esys.pc lib/tss2-mu.pc lib/tss2-tcti-device.pc lib/tss2-tcti-mssim.pc lib/tss2-tcti-swtpm.pc lib/tss2-tcti-libtpms.pc lib/tss2-tcti-pcap.pc lib/tss2-rc.pc lib/tss2-tctildr.pc lib/tss2-fapi.pc lib/tss2-tcti-cmd.pc])
++AC_CONFIG_FILES([Makefile Doxyfile lib/tss2-sys.pc lib/tss2-esys.pc lib/tss2-mu.pc lib/tss2-tcti-device.pc lib/tss2-tcti-mssim.pc lib/tss2-tcti-swtpm.pc lib/tss2-tcti-sock.pc lib/tss2-tcti-libtpms.pc lib/tss2-tcti-pcap.pc lib/tss2-rc.pc lib/tss2-tctildr.pc lib/tss2-fapi.pc lib/tss2-tcti-cmd.pc])
+ 
+ # propagate configure arguments to distcheck
+ AC_SUBST([DISTCHECK_CONFIGURE_FLAGS],[$ac_configure_args])
+@@ -204,6 +204,14 @@ AC_ARG_ENABLE([tcti-swtpm],
+ AM_CONDITIONAL([ENABLE_TCTI_SWTPM], [test "x$enable_tcti_swtpm" != xno])
+ AS_IF([test "x$enable_tcti_swtpm" = "xyes"], [AC_DEFINE([TCTI_SWTPM],[1], [TCTI FOR SWTPM])])
+ 
++AC_ARG_ENABLE([tcti-sock],
++            [AS_HELP_STRING([--disable-tcti-sock],
++                            [don't build the tcti-sock module])],,
++            [enable_tcti_sock=yes])
++AM_CONDITIONAL([ENABLE_TCTI_SOCK], [test "x$enable_tcti_sock" != xno])
++AS_IF([test "x$enable_tcti_sock" = "xyes"],
++	[AC_DEFINE([TCTI_SOCK],[1], [TCTI FOR DEV TPM])])
++
+ AC_ARG_ENABLE([tcti-pcap],
+             [AS_HELP_STRING([--disable-tcti-pcap],
+                             [don't build the tcti-pcap module])],,
+@@ -528,16 +536,19 @@ AX_ADD_AM_MACRO_STATIC([])
+ AM_COND_IF([ENABLE_TCTI_DEVICE], [],
+            [AM_COND_IF([ENABLE_TCTI_MSSIM], [],
+                        [AM_COND_IF([ENABLE_TCTI_SWTPM], [],
+-                                   [AM_COND_IF([ENABLE_TCTI_FUZZING], [],
+-                                               [AC_MSG_WARN("No build-in TCTI module enabled")])])])])
++                                   [AM_COND_IF([ENABLE_TCTI_SOCK], [],
++                                           [AM_COND_IF([ENABLE_TCTI_FUZZING], [],
++                                                       [AC_MSG_WARN("No build-in TCTI module enabled")])])])])])
+ 
+ AM_COND_IF([ENABLE_TCTI_FUZZING], [
+             AM_COND_IF([ENABLE_TCTI_DEVICE],
+-                       AC_MSG_ERROR([Fuzzing TCTI is meant to be built as the only TCTI: use --disable-tcti-device --disable-tcti-mssim --disable-tcti-swtpm]))
++                       AC_MSG_ERROR([Fuzzing TCTI is meant to be built as the only TCTI: use --disable-tcti-device --disable-tcti-mssim --disable-tcti-swtpm --disable-tcti-sock]))
+             AM_COND_IF([ENABLE_TCTI_MSSIM],
+-                       AC_MSG_ERROR([Fuzzing TCTI is meant to be built as the only TCTI: use --disable-tcti-device --disable-tcti-mssim --disable-tcti-swtpm]))
++                       AC_MSG_ERROR([Fuzzing TCTI is meant to be built as the only TCTI: use --disable-tcti-device --disable-tcti-mssim --disable-tcti-swtpm --disable-tcti-sock]))
+             AM_COND_IF([ENABLE_TCTI_SWTPM],
+-                       AC_MSG_ERROR([Fuzzing TCTI is meant to be built as the only TCTI: use --disable-tcti-device --disable-tcti-mssim --disable-tcti-swtpm]))
++                       AC_MSG_ERROR([Fuzzing TCTI is meant to be built as the only TCTI: use --disable-tcti-device --disable-tcti-mssim --disable-tcti-swtpm --disable-tcti-sock]))
++            AM_COND_IF([ENABLE_TCTI_SOCK],
++                       AC_MSG_ERROR([Fuzzing TCTI is meant to be built as the only TCTI: use --disable-tcti-device --disable-tcti-mssim --disable-tcti-swtpm --disable-tcti-sock]))
+             AS_CASE([$CC],
+                     [*clang*], [AC_MSG_NOTICE("Building fuzzing tests with $CC")],
+                     [AC_MSG_ERROR("Fuzzing TCTI can only be used with clang")])
+diff --git a/include/tss2/tss2_tcti_sock.h b/include/tss2/tss2_tcti_sock.h
+new file mode 100644
+index 000000000..d8791b017
+--- /dev/null
++++ b/include/tss2/tss2_tcti_sock.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Copyright (c) 2015 - 2018, Intel Corporation
++ * All rights reserved.
++ */
++#ifndef TSS2_TCTI_SOCK_H
++#define TSS2_TCTI_SOCK_H
++
++#include "tss2_tcti.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++TSS2_RC Tss2_Tcti_Sock_Init (
++    TSS2_TCTI_CONTEXT *tctiContext,
++    size_t *size,
++    const char *conf);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* TSS2_TCTI_SOCK_H */
+diff --git a/lib/tss2-tcti-sock.map b/lib/tss2-tcti-sock.map
+new file mode 100644
+index 000000000..871ef941c
+--- /dev/null
++++ b/lib/tss2-tcti-sock.map
+@@ -0,0 +1,7 @@
++{
++    global:
++        Tss2_Tcti_Sock_Init;
++        Tss2_Tcti_Info;
++    local:
++        *;
++};
+diff --git a/lib/tss2-tcti-sock.pc.in b/lib/tss2-tcti-sock.pc.in
+new file mode 100644
+index 000000000..4db9162cc
+--- /dev/null
++++ b/lib/tss2-tcti-sock.pc.in
+@@ -0,0 +1,12 @@
++prefix=@prefix@
++exec_prefix=@exec_prefix@
++libdir=@libdir@
++includedir=@includedir@
++
++Name: tss2-tcti-sock
++Description: TCTI library for communicating with a TPM through a socket.
++URL: https://github.com/tpm2-software/tpm2-tss
++Version: @VERSION@
++Requires.private: tss2-mu
++Cflags: -I${includedir} -I${includedir}/tss2
++Libs: -ltss2-tcti-sock -L${libdir}
+diff --git a/src/tss2-tcti/tcti-sock.c b/src/tss2-tcti/tcti-sock.c
+new file mode 100644
+index 000000000..999d96feb
+--- /dev/null
++++ b/src/tss2-tcti/tcti-sock.c
+@@ -0,0 +1,505 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Copyright (c) 2015 - 2018 Intel Corporation
++ * All rights reserved.
++ * Copyright (c) 2019, Wind River Systems.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ * this list of conditions and the following disclaimer in the documentation
++ * and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++/**
++ * MIT License
++ *
++ * Copyright (c) 2020 Infineon Technologies AG
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE
++ */
++/*
++ * This file is taken from tcti-mssim.c and modified accordingly.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <inttypes.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#ifndef _WIN32
++#include <sys/time.h>
++#include <unistd.h>
++#endif
++
++#include "tss2_mu.h"
++#include "tss2_tcti_sock.h"
++
++#include "tcti-sock.h"
++#include "tcti-common.h"
++#include "util/key-value-parse.h"
++#define LOGMODULE tcti
++#include "util/log.h"
++
++/*
++ * This function wraps the "up-cast" of the opaque TCTI context type to the
++ * type for the sock TCTI context. If passed a NULL context the function
++ * returns a NULL ptr. The function doesn't check magic number anymore
++ * It should checked by the appropriate tcti_common_checks.
++ */
++TSS2_TCTI_SOCK_CONTEXT*
++tcti_sock_context_cast (TSS2_TCTI_CONTEXT *tcti_ctx)
++{
++    if (tcti_ctx == NULL)
++        return NULL;
++
++    return (TSS2_TCTI_SOCK_CONTEXT*)tcti_ctx;
++}
++
++/*
++ * This function down-casts the sock TCTI context to the common context
++ * defined in the tcti-common module.
++ */
++TSS2_TCTI_COMMON_CONTEXT*
++tcti_sock_down_cast (TSS2_TCTI_SOCK_CONTEXT *tcti_sock)
++{
++    if (tcti_sock == NULL) {
++        return NULL;
++    }
++    return &tcti_sock->common;
++}
++
++TSS2_RC
++tcti_sock_transmit (
++    TSS2_TCTI_CONTEXT *tcti_ctx,
++    size_t size,
++    const uint8_t *cmd_buf)
++{
++    TSS2_TCTI_SOCK_CONTEXT *tcti_sock = tcti_sock_context_cast (tcti_ctx);
++    TSS2_TCTI_COMMON_CONTEXT *tcti_common = tcti_sock_down_cast (tcti_sock);
++    tpm_header_t header;
++    TSS2_RC rc;
++
++    rc = tcti_common_transmit_checks (tcti_common, cmd_buf, TCTI_SOCK_MAGIC);
++    if (rc != TSS2_RC_SUCCESS) {
++        return rc;
++    }
++    rc = header_unmarshal (cmd_buf, &header);
++    if (rc != TSS2_RC_SUCCESS) {
++        return rc;
++    }
++    if (header.size != size) {
++        LOG_ERROR ("Buffer size parameter: %zu, and TPM2 command header size "
++                   "field: %" PRIu32 " disagree.", size, header.size);
++        return TSS2_TCTI_RC_BAD_VALUE;
++    }
++
++    LOG_DEBUG ("Sending command with TPM_CC 0x%" PRIx32 " and size %" PRIu32,
++               header.code, header.size);
++    rc = socket_xmit_buf (tcti_sock->tpm_sock, cmd_buf, size);
++    if (rc != TSS2_RC_SUCCESS) {
++        return rc;
++    }
++
++    tcti_common->state = TCTI_STATE_RECEIVE;
++
++    return rc;
++}
++
++TSS2_RC
++tcti_sock_receive (
++    TSS2_TCTI_CONTEXT *tctiContext,
++    size_t *response_size,
++    unsigned char *response_buffer,
++    int32_t timeout)
++{
++#ifdef TEST_FAPI_ASYNC
++    /* Used for simulating a timeout. */
++    static int wait = 0;
++#endif
++    TSS2_TCTI_SOCK_CONTEXT *tcti_sock = tcti_sock_context_cast (tctiContext);
++    TSS2_TCTI_COMMON_CONTEXT *tcti_common = tcti_sock_down_cast (tcti_sock);
++    TSS2_RC rc;
++    int ret;
++    uint8_t header[TPM_HEADER_SIZE];
++    UINT32 resp_size;
++    size_t offset = 2;
++
++    rc = tcti_common_receive_checks (tcti_common,
++                                     response_size,
++                                     TCTI_SOCK_MAGIC);
++    if (rc != TSS2_RC_SUCCESS) {
++        return rc;
++    }
++
++    if (timeout != TSS2_TCTI_TIMEOUT_BLOCK) {
++#ifdef TEST_FAPI_ASYNC
++        if (wait < 1) {
++            LOG_TRACE("Simulating Async by requesting another invocation.");
++            wait += 1;
++            return TSS2_TCTI_RC_TRY_AGAIN;
++        } else {
++            LOG_TRACE("Sending the actual result.");
++            wait = 0;
++        }
++#endif /* TEST_FAPI_ASYNC */
++    }
++
++    if (!response_buffer) {
++        /* Receive the size of the response. */
++
++        ret = socket_poll (tcti_sock->tpm_sock, timeout);
++        if (ret != TSS2_RC_SUCCESS) {
++            if (ret == TSS2_TCTI_RC_TRY_AGAIN) {
++                return ret;
++            }
++            rc = ret;
++            goto out;
++        }
++        ret = socket_recv_buf (tcti_sock->tpm_sock, header, TPM_HEADER_SIZE);
++        if (ret != TPM_HEADER_SIZE) {
++            rc = TSS2_TCTI_RC_IO_ERROR;
++            goto out;
++        }
++
++        rc = Tss2_MU_UINT32_Unmarshal(header, TPM_HEADER_SIZE,
++                                      &offset, &resp_size);
++        if (rc != TSS2_RC_SUCCESS) {
++            LOG_ERROR ("Failed to unmarshal response size.");
++            goto out;
++        }
++
++        LOG_DEBUG ("response size: %" PRIu32, resp_size);
++
++        *response_size = resp_size;
++        memcpy (&tcti_common->header, header, TPM_HEADER_SIZE);
++        return TSS2_RC_SUCCESS;
++    }
++
++    memcpy (response_buffer, &tcti_common->header, TPM_HEADER_SIZE);
++    if (*response_size == TPM_HEADER_SIZE) {
++        goto out;
++    }
++
++    rc = header_unmarshal (response_buffer, &tcti_common->header);
++    if (rc != TSS2_RC_SUCCESS)
++        goto out;
++
++    if (*response_size < tcti_common->header.size) {
++        *response_size = tcti_common->header.size;
++        LOG_ERROR ("Response size too big: %zu > %u", *response_size, tcti_common->header.size);
++        rc = TSS2_TCTI_RC_INSUFFICIENT_BUFFER;
++        goto out;
++    }
++    *response_size = tcti_common->header.size;
++
++    /* Receive the TPM response. */
++    LOG_DEBUG("Reading response of size %" PRIu32, tcti_common->header.size);
++    ret = socket_poll (tcti_sock->tpm_sock, timeout);
++    if (ret != TSS2_RC_SUCCESS) {
++        if (ret == TSS2_TCTI_RC_TRY_AGAIN) {
++            return ret;
++        }
++        rc = ret;
++        goto out;
++    }
++    ret = socket_recv_buf (tcti_sock->tpm_sock,
++                           (unsigned char *)response_buffer + TPM_HEADER_SIZE,
++                           *response_size - TPM_HEADER_SIZE);
++    if (ret < (int) (*response_size - TPM_HEADER_SIZE) ) {
++        rc = TSS2_TCTI_RC_IO_ERROR;
++        goto out;
++    }
++    LOGBLOB_DEBUG (response_buffer, tcti_common->header.size,
++                   "Response buffer received:");
++
++    /*
++     * Executing code beyond this point transitions the state machine to
++     * TRANSMIT. Another call to this function will not be possible until
++     * another command is sent to the TPM.
++     */
++out:
++    memset (&tcti_common->header, 0, TPM_HEADER_SIZE);
++    tcti_common->state = TCTI_STATE_TRANSMIT;
++
++    return rc;
++}
++
++void
++tcti_sock_finalize(
++    TSS2_TCTI_CONTEXT *tctiContext)
++{
++    TSS2_TCTI_SOCK_CONTEXT *tcti_sock = tcti_sock_context_cast (tctiContext);
++    TSS2_TCTI_COMMON_CONTEXT *tcti_common = tcti_sock_down_cast (tcti_sock);
++
++    if (tcti_sock == NULL) {
++        return;
++    }
++    socket_close (&tcti_sock->tpm_sock);
++    tcti_common->state = TCTI_STATE_FINAL;
++}
++
++TSS2_RC
++tcti_sock_cancel (
++    TSS2_TCTI_CONTEXT *tctiContext)
++{
++    /* No mechanism to cancel commands. */
++    UNUSED(tctiContext);
++    return TSS2_TCTI_RC_NOT_IMPLEMENTED;
++}
++
++TSS2_RC
++tcti_sock_get_poll_handles (
++    TSS2_TCTI_CONTEXT *tctiContext,
++    TSS2_TCTI_POLL_HANDLE *handles,
++    size_t *num_handles)
++{
++    TSS2_TCTI_SOCK_CONTEXT *tcti_sock = tcti_sock_context_cast (tctiContext);
++
++    if (num_handles == NULL || tcti_sock == NULL) {
++        return TSS2_TCTI_RC_BAD_REFERENCE;
++    }
++
++    if (handles != NULL && *num_handles < 1) {
++        return TSS2_TCTI_RC_BAD_VALUE;
++    }
++
++    *num_handles = 1;
++    if (handles != NULL) {
++#ifdef _WIN32
++        *handles = tcti_sock->tpm_sock;
++#else
++        handles->fd = tcti_sock->tpm_sock;
++        handles->events = POLLIN | POLLOUT;
++#endif
++    }
++
++    return TSS2_RC_SUCCESS;
++}
++
++TSS2_RC
++tcti_sock_set_locality (
++    TSS2_TCTI_CONTEXT *tctiContext,
++    uint8_t locality)
++{
++    /*
++     * No mechanism for user space applications
++     * to set locality.
++     */
++    UNUSED(tctiContext);
++    UNUSED(locality);
++    return TSS2_TCTI_RC_NOT_IMPLEMENTED;
++}
++
++/*
++ * This is a utility function to extract a TCP port number from a string.
++ * The string must be 6 characters long. If the supplied string contains an
++ * invalid port number then 0 is returned.
++ */
++static uint16_t
++string_to_port (char port_str[6])
++{
++    uint32_t port = 0;
++
++    if (sscanf (port_str, "%" SCNu32, &port) == EOF || port > UINT16_MAX) {
++        return 0;
++    }
++    return port;
++}
++
++/*
++ * This function is a callback conforming to the KeyValueFunc prototype. It
++ * is called by the key-value-parse module for each key / value pair extracted
++ * from the configuration string. Its sole purpose is to identify valid keys
++ * from the conf string and to store their corresponding values in the
++ * sock_conf_t structure which is passed through the 'user_data' parameter.
++ */
++TSS2_RC
++sock_kv_callback (const key_value_t *key_value,
++                   void *user_data)
++{
++    sock_conf_t *sock_conf = (sock_conf_t*)user_data;
++
++    LOG_TRACE ("key_value: 0x%" PRIxPTR " and user_data: 0x%" PRIxPTR,
++               (uintptr_t)key_value, (uintptr_t)user_data);
++    if (key_value == NULL || user_data == NULL) {
++        LOG_WARNING ("%s passed NULL parameter", __func__);
++        return TSS2_TCTI_RC_GENERAL_FAILURE;
++    }
++    LOG_DEBUG ("key: %s / value: %s\n", key_value->key, key_value->value);
++    if (strcmp (key_value->key, "host") == 0) {
++        sock_conf->host = key_value->value;
++        sock_conf->path = NULL;
++        return TSS2_RC_SUCCESS;
++    } else if (strcmp (key_value->key, "port") == 0) {
++        sock_conf->port = string_to_port (key_value->value);
++        if (sock_conf->port == 0) {
++            return TSS2_TCTI_RC_BAD_VALUE;
++        }
++        return TSS2_RC_SUCCESS;
++    } else if (strcmp (key_value->key, "path") == 0) {
++        sock_conf->path = key_value->value;
++        sock_conf->host = NULL;
++        return TSS2_RC_SUCCESS;
++    } else {
++        return TSS2_TCTI_RC_BAD_VALUE;
++    }
++}
++void
++tcti_sock_init_context_data (
++    TSS2_TCTI_COMMON_CONTEXT *tcti_common)
++{
++    TSS2_TCTI_MAGIC (tcti_common) = TCTI_SOCK_MAGIC;
++    TSS2_TCTI_VERSION (tcti_common) = TCTI_VERSION;
++    TSS2_TCTI_TRANSMIT (tcti_common) = tcti_sock_transmit;
++    TSS2_TCTI_RECEIVE (tcti_common) = tcti_sock_receive;
++    TSS2_TCTI_FINALIZE (tcti_common) = tcti_sock_finalize;
++    TSS2_TCTI_CANCEL (tcti_common) = tcti_sock_cancel;
++    TSS2_TCTI_GET_POLL_HANDLES (tcti_common) = tcti_sock_get_poll_handles;
++    TSS2_TCTI_SET_LOCALITY (tcti_common) = tcti_sock_set_locality;
++    TSS2_TCTI_MAKE_STICKY (tcti_common) = tcti_make_sticky_not_implemented;
++    tcti_common->state = TCTI_STATE_TRANSMIT;
++    tcti_common->locality = 0;
++    memset (&tcti_common->header, 0, sizeof (tcti_common->header));
++}
++
++TSS2_RC
++Tss2_Tcti_Sock_Init (
++    TSS2_TCTI_CONTEXT *tctiContext,
++    size_t *size,
++    const char *conf)
++{
++    TSS2_TCTI_SOCK_CONTEXT *tcti_sock = (TSS2_TCTI_SOCK_CONTEXT*)tctiContext;
++    TSS2_TCTI_COMMON_CONTEXT *tcti_common = tcti_sock_down_cast (tcti_sock);
++    TSS2_RC rc;
++    char *conf_copy = NULL;
++    sock_conf_t sock_conf = SOCK_CONF_DEFAULT_INIT;
++
++    if (conf == NULL) {
++        LOG_TRACE ("tctiContext: 0x%" PRIxPTR ", size: 0x%" PRIxPTR ""
++                   " default configuration will be used.",
++                   (uintptr_t)tctiContext, (uintptr_t)size);
++    } else {
++        LOG_TRACE ("tctiContext: 0x%" PRIxPTR ", size: 0x%" PRIxPTR ", conf: %s",
++                   (uintptr_t)tctiContext, (uintptr_t)size, conf);
++    }
++    if (size == NULL) {
++        return TSS2_TCTI_RC_BAD_VALUE;
++    }
++    if (tctiContext == NULL) {
++        *size = sizeof (TSS2_TCTI_SOCK_CONTEXT);
++        return TSS2_RC_SUCCESS;
++    }
++
++    if (conf != NULL) {
++        LOG_TRACE ("conf is not NULL");
++        if (strlen (conf) > TCTI_SOCK_CONF_MAX) {
++            LOG_WARNING ("Provided conf string exceeds maximum of %u",
++                         TCTI_SOCK_CONF_MAX);
++            return TSS2_TCTI_RC_BAD_VALUE;
++        }
++        conf_copy = strdup (conf);
++        if (conf_copy == NULL) {
++            LOG_ERROR ("Failed to allocate buffer: %s", strerror (errno));
++            rc = TSS2_TCTI_RC_GENERAL_FAILURE;
++            goto fail_out;
++        }
++        LOG_DEBUG ("Dup'd conf string to: 0x%" PRIxPTR,
++                   (uintptr_t)conf_copy);
++        rc = parse_key_value_string (conf_copy,
++                                     sock_kv_callback,
++                                     &sock_conf);
++        if (rc != TSS2_RC_SUCCESS) {
++            goto fail_out;
++        }
++    }
++    LOG_DEBUG ("Initializing sock TCTI with host: %s, port: %" PRIu16,
++               sock_conf.host, sock_conf.port);
++
++    tcti_sock->tpm_sock = -1;
++
++    if (sock_conf.path)
++        rc = socket_connect_unix (sock_conf.path,
++                                  0,
++                                  &tcti_sock->tpm_sock);
++    else
++        rc = socket_connect (sock_conf.host,
++                             sock_conf.port,
++                             0,
++                             &tcti_sock->tpm_sock);
++    if (rc != TSS2_RC_SUCCESS) {
++        goto fail_out;
++    }
++
++    rc = socket_set_nonblock (tcti_sock->tpm_sock);
++    if (rc != TSS2_RC_SUCCESS) {
++        goto fail_out;
++    }
++
++    tcti_sock_init_context_data (tcti_common);
++
++    if (conf_copy != NULL) {
++        free (conf_copy);
++    }
++    return TSS2_RC_SUCCESS;
++
++fail_out:
++    if (conf_copy != NULL) {
++        free (conf_copy);
++    }
++    socket_close (&tcti_sock->tpm_sock);
++
++    return rc;
++}
++
++/* public info structure */
++const TSS2_TCTI_INFO tss2_tcti_info = {
++    .version = TCTI_VERSION,
++    .name = "tcti-socket",
++    .description = "TCTI module for communicating with a TPM through a socket.",
++    .config_help = "Key / value string in the form \"host=localhost,port=9883\".",
++    .init = Tss2_Tcti_Sock_Init,
++};
++
++const TSS2_TCTI_INFO*
++Tss2_Tcti_Info (void)
++{
++    return &tss2_tcti_info;
++}
+diff --git a/src/tss2-tcti/tcti-sock.h b/src/tss2-tcti/tcti-sock.h
+new file mode 100644
+index 000000000..ffa2816ca
+--- /dev/null
++++ b/src/tss2-tcti/tcti-sock.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Copyright (c) 2018 Intel Corporation
++ * All rights reserved.
++ */
++#ifndef TCTI_SOCK_H
++#define TCTI_SOCK_H
++
++#include <limits.h>
++
++#include "tcti-common.h"
++#include "util/io.h"
++
++/*
++ * longest possible conf string:
++ * HOST_NAME_MAX + max char uint16 (5) + strlen ("host=,port=") (11)
++ */
++#define TCTI_SOCK_CONF_MAX (_HOST_NAME_MAX + 16)
++#define TCTI_SOCK_DEFAULT_HOST "localhost"
++#define TCTI_SOCK_DEFAULT_PORT 9883
++#define TCTI_SOCK_DEFAULT_PATH NULL
++#define SOCK_CONF_DEFAULT_INIT { \
++    .host = TCTI_SOCK_DEFAULT_HOST, \
++    .port = TCTI_SOCK_DEFAULT_PORT, \
++    .path = TCTI_SOCK_DEFAULT_PATH, \
++}
++
++#define TCTI_SOCK_MAGIC 0x2eb5a163cea2f818ULL
++
++typedef struct {
++    char *host;
++    uint16_t port;
++    /* if path is NULL, we use host/port */
++    char *path;
++} sock_conf_t;
++
++typedef struct {
++    TSS2_TCTI_COMMON_CONTEXT common;
++    SOCKET tpm_sock;
++} TSS2_TCTI_SOCK_CONTEXT;
++
++#endif /* TCTI_SOCK_H */
+diff --git a/src/tss2-tcti/tctildr-dl.c b/src/tss2-tcti/tctildr-dl.c
+index abe70185b..d7c9573e1 100644
+--- a/src/tss2-tcti/tctildr-dl.c
++++ b/src/tss2-tcti/tctildr-dl.c
+@@ -56,6 +56,10 @@ struct {
+         .file = "libtss2-tcti-mssim.so.0",
+         .description = "Access to libtss2-tcti-mssim.so",
+     },
++    {
++        .file = "libtss2-tcti-sock.so.0",
++        .description = "Access to libtss2-tcti-sock.so",
++    },
+ };
+ 
+ const TSS2_TCTI_INFO*
